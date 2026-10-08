@@ -1,0 +1,764 @@
+"""
+================================================================================
+DASHBOARD EJECUTIVO INTERACTIVO - ANÁLISIS DE DATOS DESDE EXCEL
+================================================================================
+Autor: ChatCrafter (Experto Python / Streamlit / Plotly)
+Descripción:
+    Dashboard dinámico que permite cargar un archivo Excel (.xlsx) y genera
+    automáticamente KPIs, análisis de género, concentración geográfica,
+    tendencias temporales y explorador de datos con descarga en CSV.
+
+    Si no se sube ningún archivo, se genera un dataset sintético de demo.
+================================================================================
+"""
+
+import io
+import numpy as np
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
+
+# ==============================================================================
+# 1. CONFIGURACIÓN GENERAL DE LA PÁGINA
+# ==============================================================================
+st.set_page_config(
+    page_title="Dashboard IMDV",
+    page_icon="🚵",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ==============================================================================
+# 2. ESTILOS CSS PERSONALIZADOS (TEMA AZUL MARINO EJECUTIVO)
+# ==============================================================================
+CUSTOM_CSS = """
+<style>
+    /* ---------- Fondo general de la app ---------- */
+    .stApp {
+        background-color: #0A192F;
+        color: #E6F1FF;
+    }
+
+    /* ---------- Sidebar ---------- */
+    section[data-testid="stSidebar"] {
+        background-color: #172A45;
+        border-right: 1px solid #00B4D8;
+    }
+    section[data-testid="stSidebar"] .stMarkdown, 
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] span {
+        color: #90E0EF !important;
+    }
+
+    /* ---------- Títulos principales ---------- */
+    h1, h2, h3 {
+        color: #90E0EF !important;
+        font-weight: 700;
+    }
+    h4, h5, h6 {
+        color: #00B4D8 !important;
+    }
+
+    /* ---------- Texto general ---------- */
+    p, span, label, .stMarkdown {
+        color: #E6F1FF;
+    }
+
+    /* ---------- Tarjetas KPI personalizadas ---------- */
+    .kpi-card {
+        background-color: #172A45;
+        border: 1px solid #00B4D8;
+        border-radius: 14px;
+        padding: 18px 20px;
+        box-shadow: 0 4px 14px rgba(0, 180, 216, 0.15);
+        text-align: center;
+        transition: transform 0.2s ease;
+    }
+    .kpi-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 6px 18px rgba(0, 180, 216, 0.3);
+    }
+    .kpi-value {
+        font-size: 28px;
+        font-weight: 800;
+        color: #00B4D8;
+        margin: 0;
+    }
+    .kpi-label {
+        font-size: 13px;
+        color: #90E0EF;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-top: 4px;
+    }
+
+    /* ---------- Tarjetas de género ---------- */
+    .gender-card {
+        border-radius: 16px;
+        padding: 20px;
+        text-align: center;
+        box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+    }
+    .gender-card-male {
+        background: linear-gradient(145deg, #023E5C, #0077B6);
+        border: 2px solid #0077B6;
+    }
+    .gender-card-female {
+        background: linear-gradient(145deg, #5C0A3D, #FF69B4);
+        border: 2px solid #FF69B4;
+    }
+    .gender-icon {
+        font-size: 42px;
+    }
+    .gender-value {
+        font-size: 30px;
+        font-weight: 800;
+        color: white;
+        margin: 6px 0;
+    }
+    .gender-pct {
+        font-size: 15px;
+        color: #E6F1FF;
+        font-weight: 600;
+    }
+
+    /* ---------- Contenedores tipo "panel" ---------- */
+    .panel-box {
+        background-color: #172A45;
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 20px;
+        border: 1px solid rgba(0, 180, 216, 0.3);
+        box-shadow: 0 4px 14px rgba(0,0,0,0.2);
+    }
+
+    /* ---------- Tablas ---------- */
+    .stDataFrame, .dataframe {
+        background-color: #172A45 !important;
+        color: #E6F1FF !important;
+        border-radius: 10px;
+    }
+
+    /* ---------- Botones ---------- */
+    .stButton>button, .stDownloadButton>button {
+        background-color: #00B4D8;
+        color: #0A192F;
+        font-weight: 700;
+        border-radius: 10px;
+        border: none;
+        padding: 8px 20px;
+        transition: all 0.2s ease-in-out;
+    }
+    .stButton>button:hover, .stDownloadButton>button:hover {
+        background-color: #90E0EF;
+        color: #0A192F;
+    }
+
+    /* ---------- Separadores ---------- */
+    hr {
+        border-color: rgba(0,180,216,0.3);
+    }
+
+    /* ---------- Multiselect / Selectbox tags ---------- */
+    .stMultiSelect [data-baseweb="tag"] {
+        background-color: #00B4D8 !important;
+        color: #0A192F !important;
+    }
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+# ==============================================================================
+# 3. FUNCIONES DE UTILIDAD / CACHÉ
+# ==============================================================================
+
+@st.cache_resource(show_spinner=False)
+def load_excel_file(file_bytes: bytes):
+    """
+    Carga el archivo Excel en memoria y retorna un objeto pd.ExcelFile.
+    Se usa st.cache_resource porque pd.ExcelFile NO es serializable
+    y produce errores con st.cache_data.
+    """
+    try:
+        excel_obj = pd.ExcelFile(io.BytesIO(file_bytes))
+        return excel_obj
+    except Exception as e:
+        st.error(f"❌ Error al leer el archivo Excel: {e}")
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def parse_sheet_to_df(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+    """
+    Convierte una hoja específica del Excel en un DataFrame de pandas.
+    Se cachea con st.cache_data porque recibe/retorna objetos serializables
+    (bytes y DataFrame), evitando el error de hashing con pd.ExcelFile.
+    """
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name)
+        df = clean_dataframe(df)
+        return df
+    except Exception as e:
+        st.error(f"❌ Error al convertir la hoja '{sheet_name}' en DataFrame: {e}")
+        return pd.DataFrame()
+
+
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Limpieza básica y robusta del DataFrame:
+    - Elimina espacios en nombres de columnas.
+    - Intenta convertir columnas con nombres relacionados a fecha.
+    - Normaliza strings de columnas categóricas comunes.
+    """
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Intentar detectar y convertir columnas de fecha por nombre
+    posibles_fechas = [c for c in df.columns if any(
+        k in c.lower() for k in ["fecha", "date", "dia", "día"]
+    )]
+    for col in posibles_fechas:
+        try:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+        except Exception:
+            pass
+
+    # Normalizar texto en columnas tipo "genero"/"ciudad" si existen
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].astype(str).str.strip()
+
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def generate_synthetic_data(n: int = 500) -> pd.DataFrame:
+    """
+    Genera un dataset sintético de demostración con columnas típicas:
+    Fecha, Ciudad, Género, Categoría, Ventas, Edad, Satisfacción.
+    """
+    np.random.seed(42)
+    ciudades = ["Bogotá", "Medellín", "Cali", "Barranquilla", "Cartagena",
+                "Bucaramanga", "Pereira", "Manizales"]
+    generos = ["Masculino", "Femenino"]
+    categorias = ["Electrónica", "Hogar", "Moda", "Deportes", "Alimentos"]
+
+    fechas = pd.date_range(start="2024-01-01", end="2024-12-31", periods=n)
+
+    df = pd.DataFrame({
+        "Fecha": np.random.choice(fechas, n),
+        "Ciudad": np.random.choice(ciudades, n, p=[0.25, 0.18, 0.15, 0.12,
+                                                     0.10, 0.08, 0.07, 0.05]),
+        "Género": np.random.choice(generos, n, p=[0.52, 0.48]),
+        "Categoría": np.random.choice(categorias, n),
+        "Ventas": np.round(np.random.gamma(5, 150, n), 2),
+        "Edad": np.random.randint(18, 70, n),
+        "Satisfacción": np.round(np.random.uniform(1, 5, n), 1),
+    })
+    df = df.sort_values("Fecha").reset_index(drop=True)
+    return df
+
+
+def detect_column_types(df: pd.DataFrame) -> dict:
+    """
+    Detecta y clasifica las columnas del DataFrame según su tipo:
+    fechas, numéricas, categóricas (incluye detección heurística
+    de columnas de 'género' y 'ciudad').
+    """
+    tipos = {
+        "fecha": [],
+        "numerica": [],
+        "categorica": [],
+        "genero": None,
+        "ciudad": None,
+    }
+
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            tipos["fecha"].append(col)
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            tipos["numerica"].append(col)
+        else:
+            tipos["categorica"].append(col)
+
+    # Heurística para encontrar columna de género
+    for col in tipos["categorica"]:
+        if any(k in col.lower() for k in ["genero", "género", "sexo", "gender"]):
+            tipos["genero"] = col
+            break
+
+    # Heurística para encontrar columna de ciudad
+    for col in tipos["categorica"]:
+        if any(k in col.lower() for k in ["ciudad", "city", "municipio", "localidad"]):
+            tipos["ciudad"] = col
+            break
+
+    return tipos
+
+
+def render_kpi_card(label: str, value: str):
+    """Renderiza una tarjeta KPI estilizada en HTML/CSS."""
+    html = f"""
+    <div class="kpi-card">
+        <p class="kpi-value">{value}</p>
+        <p class="kpi-label">{label}</p>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_gender_card(tipo: str, cantidad: int, porcentaje: float):
+    """Renderiza tarjeta visual de género (Hombre/Mujer) con ícono y estilo."""
+    if tipo == "masculino":
+        html = f"""
+        <div class="gender-card gender-card-male">
+            <div class="gender-icon">👕</div>
+            <p class="gender-value">{cantidad:,}</p>
+            <p class="gender-pct">{porcentaje:.1f}% del total</p>
+            <p style="color:#CFE8FF; font-weight:600; margin-top:4px;">HOMBRES</p>
+        </div>
+        """
+    else:
+        html = f"""
+        <div class="gender-card gender-card-female">
+            <div class="gender-icon">👚</div>
+            <p class="gender-value">{cantidad:,}</p>
+            <p class="gender-pct">{porcentaje:.1f}% del total</p>
+            <p style="color:#FFE3F0; font-weight:600; margin-top:4px;">MUJERES</p>
+        </div>
+        """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ==============================================================================
+# 4. BARRA LATERAL: CARGA DE ARCHIVO Y FILTROS
+# ==============================================================================
+st.sidebar.title("⚙️ Panel de Control")
+st.sidebar.markdown("---")
+
+uploaded_file = st.sidebar.file_uploader(
+    "📂 Cargar archivo Excel (.xlsx)",
+    type=["xlsx"],
+    help="Sube tu archivo de datos. Si no subes nada, se usará un dataset de demostración."
+)
+
+df_original = pd.DataFrame()
+usando_demo = False
+
+if uploaded_file is not None:
+    try:
+        file_bytes = uploaded_file.getvalue()
+        excel_file = load_excel_file(file_bytes)
+
+        if excel_file is not None:
+            sheet_names = excel_file.sheet_names
+            selected_sheet = st.sidebar.selectbox(
+                "📑 Selecciona la hoja de trabajo", sheet_names
+            )
+            df_original = parse_sheet_to_df(file_bytes, selected_sheet)
+
+            if df_original.empty:
+                st.sidebar.warning("⚠️ La hoja seleccionada está vacía o no se pudo procesar.")
+        else:
+            st.sidebar.error("No fue posible abrir el archivo Excel.")
+    except Exception as e:
+        st.sidebar.error(f"❌ Error inesperado al procesar el archivo: {e}")
+else:
+    df_original = generate_synthetic_data()
+    usando_demo = True
+    st.sidebar.info("ℹ️ No se cargó archivo. Usando **dataset sintético de demostración**.")
+
+if df_original.empty:
+    st.error("🚫 No hay datos disponibles para mostrar. Verifica el archivo cargado.")
+    st.stop()
+
+# Detección dinámica de tipos de columnas
+col_types = detect_column_types(df_original)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔍 Filtros Dinámicos")
+
+df_filtrado = df_original.copy()
+
+# ---------- Filtro de rango de fechas ----------
+if col_types["fecha"]:
+    fecha_col = st.sidebar.selectbox(
+        "📅 Columna de fecha a filtrar", col_types["fecha"]
+    )
+    fechas_validas = df_original[fecha_col].dropna()
+    if not fechas_validas.empty:
+        min_fecha = fechas_validas.min().date()
+        max_fecha = fechas_validas.max().date()
+        rango_fechas = st.sidebar.date_input(
+            "Rango de fechas",
+            value=(min_fecha, max_fecha),
+            min_value=min_fecha,
+            max_value=max_fecha
+        )
+        if isinstance(rango_fechas, tuple) and len(rango_fechas) == 2:
+            inicio, fin = rango_fechas
+            df_filtrado = df_filtrado[
+                (df_filtrado[fecha_col].dt.date >= inicio) &
+                (df_filtrado[fecha_col].dt.date <= fin)
+            ]
+
+# ---------- Filtro de ciudad ----------
+if col_types["ciudad"]:
+    ciudad_col = col_types["ciudad"]
+    ciudades_disponibles = sorted(df_original[ciudad_col].dropna().unique().tolist())
+    ciudades_sel = st.sidebar.multiselect(
+        f"🏙️ Filtrar por {ciudad_col}", ciudades_disponibles, default=ciudades_disponibles
+    )
+    if ciudades_sel:
+        df_filtrado = df_filtrado[df_filtrado[ciudad_col].isin(ciudades_sel)]
+
+# ---------- Filtro de género ----------
+if col_types["genero"]:
+    genero_col = col_types["genero"]
+    generos_disponibles = sorted(df_original[genero_col].dropna().unique().tolist())
+    generos_sel = st.sidebar.multiselect(
+        f"⚧ Filtrar por {genero_col}", generos_disponibles, default=generos_disponibles
+    )
+    if generos_sel:
+        df_filtrado = df_filtrado[df_filtrado[genero_col].isin(generos_sel)]
+
+# ---------- Filtros categóricos adicionales ----------
+otras_categoricas = [c for c in col_types["categorica"]
+                      if c not in [col_types["genero"], col_types["ciudad"]]]
+
+if otras_categoricas:
+    with st.sidebar.expander("📋 Filtros categóricos adicionales"):
+        for col in otras_categoricas:
+            valores_unicos = df_original[col].dropna().unique().tolist()
+            # Evitar generar demasiados filtros con columnas de alta cardinalidad (ej. IDs)
+            if 1 < len(valores_unicos) <= 50:
+                seleccion = st.multiselect(
+                    f"{col}", sorted(valores_unicos), default=sorted(valores_unicos)
+                )
+                if seleccion:
+                    df_filtrado = df_filtrado[df_filtrado[col].isin(seleccion)]
+
+# ---------- Sliders numéricos ----------
+if col_types["numerica"]:
+    with st.sidebar.expander("🎚️ Filtros numéricos (rango)"):
+        for col in col_types["numerica"]:
+            col_min = float(df_original[col].min())
+            col_max = float(df_original[col].max())
+            if col_min < col_max:
+                rango_sel = st.slider(
+                    f"{col}", min_value=col_min, max_value=col_max,
+                    value=(col_min, col_max)
+                )
+                df_filtrado = df_filtrado[
+                    (df_filtrado[col] >= rango_sel[0]) &
+                    (df_filtrado[col] <= rango_sel[1])
+                ]
+
+st.sidebar.markdown("---")
+st.sidebar.caption(f"📊 Registros filtrados: **{len(df_filtrado):,}** / {len(df_original):,}")
+
+
+# ==============================================================================
+# 5. ENCABEZADO PRINCIPAL
+# ==============================================================================
+st.title("📊 Dashboard Ejecutivo de Analítica")
+subtitulo = "Datos de demostración sintética" if usando_demo else f"Fuente: {uploaded_file.name}"
+st.markdown(f"<p style='color:#90E0EF; font-size:16px;'>{subtitulo}</p>", unsafe_allow_html=True)
+st.markdown("---")
+
+if df_filtrado.empty:
+    st.warning("⚠️ No hay registros que cumplan con los filtros seleccionados.")
+    st.stop()
+
+
+# ==============================================================================
+# 6. TARJETAS DE KPIs GENERALES
+# ==============================================================================
+st.subheader("📌 Indicadores Clave (KPIs)")
+
+numeric_cols = col_types["numerica"]
+total_registros = len(df_filtrado)
+
+# Construir lista dinámica de KPIs según columnas numéricas disponibles
+kpi_cols = st.columns(4)
+
+with kpi_cols[0]:
+    render_kpi_card("Total de Registros", f"{total_registros:,}")
+
+if numeric_cols:
+    # Tomamos la primera columna numérica como métrica principal (o permite elegir)
+    metrica_principal = numeric_cols[0]
+    suma_total = df_filtrado[metrica_principal].sum()
+    promedio = df_filtrado[metrica_principal].mean()
+    maximo = df_filtrado[metrica_principal].max()
+
+    with kpi_cols[1]:
+        render_kpi_card(f"Suma Total ({metrica_principal})", f"{suma_total:,.2f}")
+    with kpi_cols[2]:
+        render_kpi_card(f"Promedio ({metrica_principal})", f"{promedio:,.2f}")
+    with kpi_cols[3]:
+        render_kpi_card(f"Máximo ({metrica_principal})", f"{maximo:,.2f}")
+else:
+    with kpi_cols[1]:
+        render_kpi_card("Columnas Numéricas", "No detectadas")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+
+# ==============================================================================
+# 7. MÓDULO VISUAL DE GÉNERO (INFOGRAFÍA)
+# ==============================================================================
+if col_types["genero"]:
+    st.subheader("👥 Distribución por Género")
+    genero_col = col_types["genero"]
+
+    conteo_genero = df_filtrado[genero_col].value_counts()
+    total_genero = conteo_genero.sum()
+
+    # Identificar valores masculino/femenino de forma flexible
+    masculino_keys = ["masculino", "hombre", "male", "m", "h"]
+    femenino_keys = ["femenino", "mujer", "female", "f"]
+
+    cantidad_masc = 0
+    cantidad_fem = 0
+    for valor, cantidad in conteo_genero.items():
+        valor_lower = str(valor).lower().strip()
+        if valor_lower in masculino_keys:
+            cantidad_masc += cantidad
+        elif valor_lower in femenino_keys:
+            cantidad_fem += cantidad
+
+    col_m, col_f, col_graf = st.columns([1, 1, 2])
+
+    with col_m:
+        pct_m = (cantidad_masc / total_genero * 100) if total_genero > 0 else 0
+        render_gender_card("masculino", cantidad_masc, pct_m)
+
+    with col_f:
+        pct_f = (cantidad_fem / total_genero * 100) if total_genero > 0 else 0
+        render_gender_card("femenino", cantidad_fem, pct_f)
+
+    with col_graf:
+        # Gráfico de dona comparativo con colores personalizados
+        colores_genero = {}
+        for valor in conteo_genero.index:
+            valor_lower = str(valor).lower().strip()
+            if valor_lower in masculino_keys:
+                colores_genero[valor] = "#0077B6"
+            elif valor_lower in femenino_keys:
+                colores_genero[valor] = "#FF69B4"
+            else:
+                colores_genero[valor] = "#00B4D8"
+
+        fig_genero = px.pie(
+            names=conteo_genero.index,
+            values=conteo_genero.values,
+            hole=0.45,
+            color=conteo_genero.index,
+            color_discrete_map=colores_genero,
+            title="Comparativo por Género"
+        )
+        fig_genero.update_layout(
+            paper_bgcolor="#172A45",
+            plot_bgcolor="#172A45",
+            font_color="#E6F1FF",
+            title_font_color="#90E0EF",
+            legend_font_color="#E6F1FF"
+        )
+        st.plotly_chart(fig_genero, use_container_width=True)
+
+    st.markdown("---")
+else:
+    st.info("ℹ️ No se detectó una columna de género en los datos cargados. Módulo omitido.")
+
+
+# ==============================================================================
+# 8. CONCENTRACIÓN GEOGRÁFICA Y MATRIZ DE CALOR
+# ==============================================================================
+if col_types["ciudad"]:
+    st.subheader("🗺️ Concentración Geográfica")
+    ciudad_col = col_types["ciudad"]
+
+    col_rank, col_heat = st.columns(2)
+
+    # ---------- Ranking horizontal de ciudades ----------
+    with col_rank:
+        conteo_ciudad = df_filtrado[ciudad_col].value_counts().reset_index()
+        conteo_ciudad.columns = [ciudad_col, "Cantidad"]
+        conteo_ciudad = conteo_ciudad.sort_values("Cantidad", ascending=True)
+
+        fig_rank = px.bar(
+            conteo_ciudad,
+            x="Cantidad", y=ciudad_col,
+            orientation="h",
+            color="Cantidad",
+            color_continuous_scale=["#003049", "#00B4D8", "#90E0EF"],
+            title=f"Ranking de {ciudad_col}"
+        )
+        fig_rank.update_layout(
+            paper_bgcolor="#172A45",
+            plot_bgcolor="#172A45",
+            font_color="#E6F1FF",
+            title_font_color="#90E0EF",
+            coloraxis_showscale=False
+        )
+        st.plotly_chart(fig_rank, use_container_width=True)
+
+    # ---------- Matriz de calor Ciudad vs Género ----------
+    with col_heat:
+        if col_types["genero"]:
+            genero_col = col_types["genero"]
+            tabla_cruzada = pd.crosstab(
+                df_filtrado[ciudad_col], df_filtrado[genero_col]
+            )
+
+            fig_heat = px.imshow(
+                tabla_cruzada,
+                labels=dict(x=genero_col, y=ciudad_col, color="Cantidad"),
+                color_continuous_scale=["#0A192F", "#00B4D8", "#90E0EF"],
+                aspect="auto",
+                title=f"Matriz de Calor: {ciudad_col} vs {genero_col}"
+            )
+            fig_heat.update_layout(
+                paper_bgcolor="#172A45",
+                plot_bgcolor="#172A45",
+                font_color="#E6F1FF",
+                title_font_color="#90E0EF"
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+        else:
+            st.info("ℹ️ No hay columna de género para generar la matriz de calor.")
+
+    st.markdown("---")
+else:
+    st.info("ℹ️ No se detectó una columna de ciudad en los datos cargados. Módulo omitido.")
+
+
+# ==============================================================================
+# 9. ANÁLISIS DE TENDENCIAS Y DISTRIBUCIÓN
+# ==============================================================================
+st.subheader("📈 Tendencias y Distribución")
+
+tab1, tab2, tab3 = st.tabs(["📉 Evolución Temporal", "📊 Comparativo por Categoría", "🍩 Composición Porcentual"])
+
+# ---------- TAB 1: Evolución Temporal ----------
+with tab1:
+    if col_types["fecha"] and numeric_cols:
+        fecha_sel = st.selectbox(
+            "Selecciona la columna de fecha", col_types["fecha"], key="fecha_tendencia"
+        )
+        metrica_sel = st.selectbox(
+            "Selecciona la métrica numérica (eje Y)", numeric_cols, key="metrica_tendencia"
+        )
+
+        df_tendencia = df_filtrado.dropna(subset=[fecha_sel]).copy()
+        df_tendencia = df_tendencia.sort_values(fecha_sel)
+        df_agrupado = df_tendencia.groupby(
+            df_tendencia[fecha_sel].dt.to_period("D").apply(lambda r: r.start_time)
+        )[metrica_sel].sum().reset_index()
+        df_agrupado.columns = [fecha_sel, metrica_sel]
+
+        fig_linea = px.line(
+            df_agrupado, x=fecha_sel, y=metrica_sel,
+            markers=True,
+            title=f"Evolución de {metrica_sel} en el tiempo",
+            color_discrete_sequence=["#00B4D8"]
+        )
+        fig_linea.update_traces(line=dict(width=3), marker=dict(size=6, color="#90E0EF"))
+        fig_linea.update_layout(
+            paper_bgcolor="#172A45",
+            plot_bgcolor="#172A45",
+            font_color="#E6F1FF",
+            title_font_color="#90E0EF",
+            xaxis=dict(gridcolor="#263B55"),
+            yaxis=dict(gridcolor="#263B55")
+        )
+        st.plotly_chart(fig_linea, use_container_width=True)
+    else:
+        st.info("ℹ️ Se requiere al menos una columna de fecha y una columna numérica para este gráfico.")
+
+# ---------- TAB 2: Comparativo por Categoría ----------
+with tab2:
+    categoricas_disponibles = col_types["categorica"]
+    if categoricas_disponibles and numeric_cols:
+        cat_sel = st.selectbox(
+            "Selecciona la variable categórica", categoricas_disponibles, key="cat_barras"
+        )
+        metrica_barras = st.selectbox(
+            "Selecciona la métrica numérica", numeric_cols, key="metrica_barras"
+        )
+
+        df_barras = df_filtrado.groupby(cat_sel)[metrica_barras].sum().reset_index()
+        df_barras = df_barras.sort_values(metrica_barras, ascending=False)
+
+        fig_barras = px.bar(
+            df_barras, x=cat_sel, y=metrica_barras,
+            color=cat_sel,
+            title=f"{metrica_barras} por {cat_sel}",
+            color_discrete_sequence=px.colors.sequential.Blues_r
+        )
+        fig_barras.update_layout(
+            paper_bgcolor="#172A45",
+            plot_bgcolor="#172A45",
+            font_color="#E6F1FF",
+            title_font_color="#90E0EF",
+            showlegend=False,
+            xaxis=dict(gridcolor="#263B55"),
+            yaxis=dict(gridcolor="#263B55")
+        )
+        st.plotly_chart(fig_barras, use_container_width=True)
+    else:
+        st.info("ℹ️ Se requiere al menos una columna categórica y una numérica para este gráfico.")
+
+# ---------- TAB 3: Composición Porcentual (Dona) ----------
+with tab3:
+    if categoricas_disponibles:
+        cat_dona = st.selectbox(
+            "Selecciona la variable categórica", categoricas_disponibles, key="cat_dona"
+        )
+        conteo_dona = df_filtrado[cat_dona].value_counts().reset_index()
+        conteo_dona.columns = [cat_dona, "Cantidad"]
+
+        fig_dona = px.pie(
+            conteo_dona, names=cat_dona, values="Cantidad",
+            hole=0.4,
+            title=f"Composición Porcentual por {cat_dona}",
+            color_discrete_sequence=px.colors.sequential.Teal
+        )
+        fig_dona.update_layout(
+            paper_bgcolor="#172A45",
+            plot_bgcolor="#172A45",
+            font_color="#E6F1FF",
+            title_font_color="#90E0EF",
+            legend_font_color="#E6F1FF"
+        )
+        st.plotly_chart(fig_dona, use_container_width=True)
+    else:
+        st.info("ℹ️ No se detectaron columnas categóricas para este gráfico.")
+
+st.markdown("---")
+
+
+# ==============================================================================
+# 10. EXPLORADOR DE DATOS Y DESCARGA
+# ==============================================================================
+st.subheader("🔎 Explorador de Datos")
+
+st.markdown('<div class="panel-box">', unsafe_allow_html=True)
+st.dataframe(df_filtrado, use_container_width=True, height=400)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Botón de descarga en formato CSV
+csv_data = df_filtrado.to_csv(index=False).encode("utf-8-sig")
+
+st.download_button(
+    label="📥 Descargar datos filtrados (CSV)",
+    data=csv_data,
+    file_name="datos_filtrados.csv",
+    mime="text/csv"
+)
+
+st.markdown("---")
+st.caption("Dashboard Ejecutivo generado con Streamlit + Plotly | Diseño Azul Marino Corporativo")
